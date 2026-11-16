@@ -2093,7 +2093,7 @@ function processLine(S, line) {
           cur.offset = probe.offset; cur.column = probe.column; cur.partial = probe.partial;
           cur.advance(1, false);
           if (cur.peek() === ' ') cur.advance(1, false);
-          else if (cur.peek() === '\t') cur.advance(1, true);
+          else if (cur.peek() === '\t') { cur.qtab = true; cur.advance(1, true); }
           ok = true;
         }
       }
@@ -2605,7 +2605,27 @@ function leafParagraph(S, cur, line) {
   }
   // Continuation line: the remainder is kept as-is, except that the
   // line after a hard break is stripped of all leading whitespace.
-  const text = para.prevHard ? rem.replace(/^[ \t]+/, '') : rem;
+  // In a blockquote nested inside a list item, a tab adjacent to the
+  // quote marker (consumed by the quote match, or starting the
+  // remainder's leading run) renders as exactly two spaces.
+  let remAdj = rem;
+  if (!para.prevHard) {
+    let inItem = false, inQuote = false;
+    for (let anc = para.parent; anc; anc = anc.parent) {
+      if (anc.type === 'item') inItem = true;
+      if (anc.type === 'blockquote') inQuote = true;
+    }
+    if (inItem && inQuote) {
+      const rawRem = cur.remainderRaw();
+      const run = /^[ \t]*/.exec(rawRem)[0];
+      if (run.includes('\t')) {
+        remAdj = '  ' + rawRem.slice(run.length);
+      } else if (cur.qtab && !/^[ \t]/.test(remAdj)) {
+        remAdj = '  ' + remAdj;
+      }
+    }
+  }
+  const text = para.prevHard ? rem.replace(/^[ \t]+/, '') : remAdj;
   para.literal += text + '\n';
   para.prevHard = / {2}$/.test(rem) || /\\$/.test(rem);
 }
