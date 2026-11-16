@@ -861,6 +861,7 @@ function looseLabelEnd(text, start) {
 function labelHasDanglingTick(text, a, b) {
   let i = a;
   while (i < b) {
+    if (text[i] === '\\' && i + 1 < b) { i += 2; continue; }
     if (text[i] !== '`') { i++; continue; }
     let j = i;
     while (j < b && text[j] === '`') j++;
@@ -1115,7 +1116,10 @@ function parseInline(text, refs) {
       let bound = n;
       if (bracketStack.length > 0) {
         const top = bracketStack[bracketStack.length - 1];
-        if (top.limit >= 0) bound = top.limit;
+        // The bound applies only to a span that starts inside the
+        // bracket's label region; a stale bracket whose label region
+        // already ended must not suppress spans after it.
+        if (top.limit >= 0 && i < top.limit) bound = top.limit;
       }
       let k = j;
       let closeStart = -1;
@@ -2135,10 +2139,10 @@ function processLine(S, line) {
         // A tab that immediately follows the quote marker (`> \t` or
         // `>\t`) becomes exactly two spaces in marked's output; any
         // other tab in the run expands by absolute column below.
-        if (cur.partial === 0 && line[cur.offset] === '\t' &&
+        if (line[cur.offset] === '\t' &&
             (line[cur.offset - 1] === '>' ||
              (line[cur.offset - 1] === ' ' && line[cur.offset - 2] === '>'))) {
-          base = '  ' + cur.remainderRaw().slice(1);
+          base = '  ' + line.slice(cur.offset + 1);
         }
         const run = /^[ \t]*/.exec(base)[0];
         if (run.includes('\t')) {
@@ -2281,7 +2285,11 @@ function processLine(S, line) {
     if (tipB.type === 'html' && tipB.htmlType >= 6) {
       stripHtmlNewline(tipB);
     } else if (!line.includes('\t')) {
-      // Terminator-ended html block followed by a spaces-only blank.
+      // An html block at the end of the last-child chain loses its
+      // trailing newline on a following blank line only when the
+      // blank is completely empty, or when the block is type 6/7
+      // (blank-terminated). A spaces-only blank after a
+      // terminator-ended block (types 1-5) keeps the newline.
       let b = S.doc;
       for (;;) {
         const kids = b.children;
@@ -2291,7 +2299,10 @@ function processLine(S, line) {
           if (!kids[k].removed) { last = kids[k]; break; }
         }
         if (!last) break;
-        if (last.type === 'html') { stripHtmlNewline(last); break; }
+        if (last.type === 'html') {
+          if (line === '' || last.htmlType >= 6) stripHtmlNewline(last);
+          break;
+        }
         if (!last.children || last.children.length === 0) break;
         b = last;
       }
