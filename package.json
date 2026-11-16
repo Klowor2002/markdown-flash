@@ -1,5 +1,1 @@
-{
-  "name": "markdown-flash",
-  "version": "1.0.0",
-  "type": "module"
-}
+{"description":"FlashMark — a from-scratch Markdown renderer byte-identical to marked, built for speed.","main":"parse.js","name":"markdown-flash","type":"module","version":"1.0.0"}
