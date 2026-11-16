@@ -511,11 +511,25 @@ function matchATX(rem) {
   return { level: m[1].length, text };
 }
 // Setext underline on remainder; returns level or 0.
+function stripLeadBlanks(s) {
+  let i = 0;
+  while (s[i] === ' ' || s[i] === '\t') i++;
+  return i === 0 ? s : s.slice(i);
+}
+function stripTrailBlanks(s) {
+  let i = s.length;
+  while (i > 0 && (s[i - 1] === ' ' || s[i - 1] === '\t')) i--;
+  return i === s.length ? s : s.slice(0, i);
+}
 function matchSetext(rem) {
-  const t = rem.replace(/[ \t]+$/, '');
-  if (/^=+$/.test(t)) return 1;
-  if (/^-+$/.test(t)) return 2;
-  return 0;
+  // manual scan: a run of = (level 1) or - (level 2), then only blanks
+  let i = 0;
+  const c = rem[0];
+  if (c !== '=' && c !== '-') return 0;
+  while (rem[i] === c) i++;
+  while (rem[i] === ' ' || rem[i] === '\t') i++;
+  if (i !== rem.length) return 0;
+  return c === '=' ? 1 : 2;
 }
 // Fence start on remainder; returns {ch, len, info} or null.
 function matchFence(rem) {
@@ -529,10 +543,10 @@ function matchFence(rem) {
 // contentIndentFromMarkerStart, empty, endOffset...} or null.
 function matchListMarker(cur) {
   const s = cur.s;
-  let pos = cur.nextNonspace;
-  // materialize: work on remainder string with column tracking from cur.column+cur.indent
-  const rem = cur.remainder().slice(cur.nextNonspace - cur.offset >= 0 ? 0 : 0);
-  // Simpler: build the string from nextNonspace accounting partial tab.
+  // fast bail: a marker starts with -, +, * or a digit at the first nonspace char
+  if (cur.partialTab > 0) return null;
+  const c0peek = s[cur.nextNonspace];
+  if (!(c0peek === '-' || c0peek === '+' || c0peek === '*' || (c0peek >= '0' && c0peek <= '9'))) return null;
   let str;
   if (cur.partialTab > 0) str = ' '.repeat(cur.partialTab) + s.slice(cur.offset);
   else str = s.slice(cur.nextNonspace);
@@ -652,14 +666,20 @@ class Parser {
       this.processLine(body, lineTerm(raw) !== '');
     }
     // register link reference definitions in document order (first wins),
-    // so forward references resolve
-    const walk = (b) => {
-      for (const c of b.children) {
-        if (c.type === 'paragraph' || c.type === 'heading') stripDefs(c.literal, this.defs);
-        walk(c);
+    // so forward references resolve; only literals that can begin with a
+    // definition (up to 3 spaces, then '[') need the full strip pass
+    const todo = [this.doc];
+    while (todo.length) {
+      const b = todo.pop();
+      if (b.type === 'paragraph' || b.type === 'heading') {
+        const lit = b.literal;
+        let q = 0;
+        while (lit[q] === ' ' && q < 4) q++;
+        b._stripped = (q <= 3 && lit[q] === '[') ? stripDefs(lit, this.defs) : lit;
       }
-    };
-    walk(this.doc);
+      const kids = b.children;
+      for (let i = kids.length - 1; i >= 0; i--) todo.push(kids[i]);
+    }
     return this.doc;
   }
 
@@ -751,7 +771,7 @@ class Parser {
         const t = rem.replace(/[ \t]+$/, '');
         const m = new RegExp('^' + (fence.fch === '`' ? '`' : '~') + '{' + fence.flen + ',}$').exec(t.trimStart ? t : t);
         // remainder may have leading spaces (indent<=3); strip them for the test
-        const stripped = rem.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+        const stripped = stripTrailBlanks(stripLeadBlanks(rem));
         const mm = /^(`{3,}|~{3,})$/.exec(stripped);
         return mm && mm[1][0] === fence.fch && mm[1].length >= fence.flen;
       })();
@@ -870,7 +890,7 @@ class Parser {
     if (!matched && tipNow.type === 'paragraph' && !siblingForList) {
       if (!this.lazyWouldStart(cur)) {
         const rem = cur.remainder();
-        const firstNonspace = rem.replace(/^[ \t]+/, '');
+        const firstNonspace = stripLeadBlanks(rem);
         const lastNlL = tipNow.literal.lastIndexOf('\n');
         const lastLineL = lastNlL === -1 ? tipNow.literal : tipNow.literal.slice(lastNlL + 1);
         if (/  $/.test(lastLineL) || lastLineL.endsWith('\\')) {
@@ -934,12 +954,13 @@ class Parser {
   isTableEndLine(cur) {
     if (cur.indent <= 3) {
       const rem = cur.remainder();
-      const first = rem.replace(/^[ \t]+/, '');
+      const first = stripLeadBlanks(rem);
       if (first[0] === '>') return true;
-      if (matchATX(first)) return true;
-      if (matchFence(first)) return true;
+      if (first[0] === '#' && matchATX(first)) return true;
+      const fc0 = first[0];
+      if ((fc0 === '`' || fc0 === '~') && matchFence(first)) return true;
       if (isThematicBreak(first)) return true;
-      if (htmlBlockStart(first)) return true;
+      if (fc0 === '<' && htmlBlockStart(first)) return true;
       const snap = { offset: cur.offset, column: cur.column, partialTab: cur.partialTab };
       const mk = matchListMarker(cur);
       cur.offset = snap.offset; cur.column = snap.column; cur.partialTab = snap.partialTab; cur.computeIndent();
@@ -984,7 +1005,7 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
     if (tip.type === 'code' || tip.type === 'html' || tip.type === 'table') break;
     if (cur.indent <= 3) {
       const rem = cur.remainder();
-      const first = rem.replace(/^[ \t]+/, '');
+      const first = stripLeadBlanks(rem);
       if (first[0] === '>') {
         openedAny = true;
         const bq = this.addBlock('blockquote', tip.type === 'paragraph' ? tip.parent : tip);
@@ -1001,7 +1022,7 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
         }
         continue;
       }
-      const setextLike = tip.type === 'paragraph' && matchSetext(first.replace(/[ \t]+$/, '')) > 0;
+      const setextLike = tip.type === 'paragraph' && matchSetext(first) > 0;
       if (!setextLike && isThematicBreak(first)) {
         if (tip.type === 'paragraph') this.stack.pop();
         if (this.tip().type === 'list' && !openedAny) this.stack.pop();
@@ -1047,7 +1068,7 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
   // leaf phase
   const tip = this.tip();
   const rem = cur.remainder();
-  const first = rem.replace(/^[ \t]+/, '');
+  const first = stripLeadBlanks(rem);
   if (curBlank(cur)) return true; // containers-only line: no leaf block starts
   if (tip.type === 'paragraph') {
     if (cur.indent <= 3) {
@@ -1078,19 +1099,19 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
             return true;
           }
         }
-        const atx = matchATX(first);
+        const atx = first[0] === '#' ? matchATX(first) : null;
         if (atx) {
           const parent = tip.parent; this.stack.pop();
           const h = this.addBlock('heading', parent); h.level = atx.level; h.text = atx.text;
           return true;
         }
-        const fence = matchFence(first);
+        const fence = (first[0] === '`' || first[0] === '~') ? matchFence(first) : null;
         if (fence) {
           const parent = tip.parent; this.stack.pop();
           this.startFence(parent, fence, cur);
           return true;
         }
-        const hb = htmlBlockStart(first);
+        const hb = first[0] === '<' ? htmlBlockStart(first) : null;
         if (hb && hb.htype <= 6) {
           const parent = tip.parent; this.stack.pop();
           this.startHtml(parent, hb, cur);
@@ -1118,11 +1139,11 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
     return true;
   }
   if (cur.indent <= 3) {
-    const atx = matchATX(first);
+    const atx = first[0] === '#' ? matchATX(first) : null;
     if (atx) { const h = this.addBlock('heading', tip); h.level = atx.level; h.text = atx.text; return true; }
-    const fence = matchFence(first);
+    const fence = (first[0] === '`' || first[0] === '~') ? matchFence(first) : null;
     if (fence) { this.startFence(tip, fence, cur); return true; }
-    const hb = htmlBlockStart(first);
+    const hb = first[0] === '<' ? htmlBlockStart(first) : null;
     if (hb) { this.startHtml(tip, hb, cur); return true; }
   }
   const p = this.addBlock('paragraph', tip);
@@ -1134,7 +1155,7 @@ Parser.prototype.startFence = function (parent, fence, cur) {
   const b = this.addBlock('code', parent);
   b.fenced = true; b.fch = fence.ch; b.flen = fence.len;
   b.indentChars = (cur.partialTab > 0 ? 1 : 0) + Math.max(0, cur.nextNonspace - cur.offset);
-  const info = fence.info.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+  const info = stripTrailBlanks(stripLeadBlanks(fence.info));
   b.info = info;
   const firstWord = info.split(/[ \t]+/)[0] || '';
   b.lang = unescapeStr(firstWord);
@@ -1146,7 +1167,7 @@ Parser.prototype.startHtml = function (parent, hb, cur) {
   const b = this.addBlock('html', parent);
   b.htype = hb.htype;
   if (hb.htype === 1) {
-    const m = /^<([A-Za-z][A-Za-z0-9-]*)/.exec(cur.remainder().replace(/^[ \t]+/, ''));
+    const m = /^<([A-Za-z][A-Za-z0-9-]*)/.exec(stripLeadBlanks(cur.remainder()));
     b.htag = m ? m[1].toLowerCase() : '';
   }
   b.literal = cur.remainder() + (this.curTerm !== undefined ? this.curTerm : '\n');
@@ -1160,12 +1181,12 @@ Parser.prototype.startHtml = function (parent, hb, cur) {
 Parser.prototype.lazyWouldStart = function (cur) {
   if (cur.indent > 3) return false;
   const rem = cur.remainder();
-  const first = rem.replace(/^[ \t]+/, '');
+  const first = stripLeadBlanks(rem);
   if (first[0] === '>') return true;
   if (isThematicBreak(first)) return true;
-  if (matchATX(first)) return true;
-  if (matchFence(first)) return true;
-  const hb = htmlBlockStart(first);
+  if (first[0] === '#' && matchATX(first)) return true;
+  if ((first[0] === '`' || first[0] === '~') && matchFence(first)) return true;
+  const hb = first[0] === '<' ? htmlBlockStart(first) : null;
   if (hb && hb.htype <= 6) return true;
   if (matchSetext(first) > 0) return false; // setext-shaped lazy lines use the quirk path
   const snap = { offset: cur.offset, column: cur.column, partialTab: cur.partialTab };
@@ -1178,6 +1199,13 @@ Parser.prototype.lazyWouldStart = function (cur) {
 // ---------- inline parsing ----------
 const EMAIL_RE = /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/y;
 const SPECIAL_CHARS = new Set(['\\', '`', '[', ']', '!', '<', '*', '_', '~', '\n']);
+// ASCII classes for the text-run loop: 1 = stop before, 2 = punct (consume, then stop)
+const CHAR_CLASS = new Uint8Array(128);
+for (let c = 0; c < 128; c++) {
+  const ch = String.fromCharCode(c);
+  if (SPECIAL_CHARS.has(ch) || ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') CHAR_CLASS[c] = 1;
+  else if (ASCII_PUNCT.has(ch)) CHAR_CLASS[c] = 2;
+}
 function isWsCh(ch) {
   if (ch === undefined) return true;
   if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') return true;
@@ -1331,9 +1359,19 @@ class InlineParser {
       }
       // plain text run (stops after punctuation so autolinks get a boundary)
       let j = i;
-      while (j < s.length && !SPECIAL_CHARS.has(s[j]) && !isWsCh(s[j])) {
-        const c = s[j]; j++;
-        if (isUniPunct(c)) break;
+      while (j < s.length) {
+        const code = s.charCodeAt(j);
+        if (code < 128) {
+          const cls = CHAR_CLASS[code];
+          if (cls === 1) break;
+          j++;
+          if (cls === 2) break;
+        } else {
+          const c = s[j];
+          if (SPECIAL_CHARS.has(c) || isWsCh(c)) break;
+          j++;
+          if (isUniPunct(c)) break;
+        }
       }
       if (j === i) { this.pushText(ch); i++; } // whitespace char
       else { this.pushText(s.slice(i, j)); i = j; }
@@ -1847,13 +1885,13 @@ function renderBlock(b, ctx, tightPara) {
   switch (b.type) {
     case 'document': return renderBlocks(b.children, ctx, false);
     case 'paragraph': {
-      const text = stripDefs(b.literal, ctx.defs);
+      const text = b._stripped !== undefined ? b._stripped : stripDefs(b.literal, ctx.defs);
       if (text === '') return '';
       if (tightPara) return renderInline(text, ctx);
       return '<p>' + renderInline(text, ctx) + '</p>\n';
     }
     case 'heading': {
-      const text = b.text !== undefined ? b.text : stripDefs(b.literal, ctx.defs).trim();
+      const text = b.text !== undefined ? b.text : (b._stripped !== undefined ? b._stripped : stripDefs(b.literal, ctx.defs)).trim();
       return '<h' + b.level + '>' + renderInline(text, ctx) + '</h' + b.level + '>\n';
     }
     case 'hr': return '<hr>\n';
@@ -1892,7 +1930,7 @@ function renderBlock(b, ctx, tightPara) {
       for (let k = 0; k < kids.length; k++) {
         const child = kids[k];
         if (child.type === 'paragraph') {
-          const text = stripDefs(child.literal, ctx.defs);
+          const text = child._stripped !== undefined ? child._stripped : stripDefs(child.literal, ctx.defs);
           if (text === '') continue;
           // task list check on first paragraph
           let t = text, checkbox = '';
