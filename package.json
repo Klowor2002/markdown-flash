@@ -1,1 +1,1 @@
-{"description":"FlashMark — a from-scratch Markdown renderer byte-identical to marked, built for speed.","main":"parse.js","name":"markdown-flash","type":"module","version":"1.0.0"}
+{"description":"A fast, dependency-free Markdown renderer producing byte-identical output to marked 18.1.3","exports":{".":"./parse.js"},"keywords":["markdown","marked","gfm","commonmark","renderer"],"license":"MIT","main":"parse.js","name":"flashmark","scripts":{"start":"node main.ts","test":"node --test"},"type":"module","version":"1.0.0"}
