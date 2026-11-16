@@ -221,8 +221,7 @@ function htmlBlockStart(rem) {
   }
   return null;
 }
-function htmlBlockEnded(b, joinedBefore) {
-  const lit = b.literal;
+function htmlChunkEnds(b, lit) {
   switch (b.htype) {
     case 1: {
       const t = b.htag;
@@ -234,6 +233,13 @@ function htmlBlockEnded(b, joinedBefore) {
     case 5: return lit.includes(']]>');
     default: return false;
   }
+}
+function htmlBlockEnded(b) {
+  // _ended is maintained incrementally: a terminator never spans the
+  // newline joining two literal lines, so checking each appended chunk
+  // is equivalent to scanning the whole literal
+  if (b._ended === undefined) b._ended = htmlChunkEnds(b, b.literal);
+  return b._ended;
 }
 
 // ---------- strict HTML tag parsing (CommonMark grammar) ----------
@@ -593,9 +599,9 @@ function unescapeStr(s) {
 }
 
 function subtreeLastContent(b) {
-  let m = b.lastContent || 0;
-  for (const c of b.children) m = Math.max(m, subtreeLastContent(c));
-  return m;
+  // every block on the stack is stamped with lastContent on each content
+  // line, so a block's own stamp is already its subtree's maximum
+  return b.lastContent || 0;
 }
 class Parser {
   constructor(src) {
@@ -790,7 +796,9 @@ class Parser {
       return;
     } else if (tipB.type === 'html' && tipB.htype <= 5 && !htmlBlockEnded(tipB)) {
       if (matched) {
-        tipB.literal += cur.remainder() + this.curTerm;
+        const chunk = cur.remainder() + this.curTerm;
+        tipB.literal += chunk;
+        if (htmlChunkEnds(tipB, chunk)) tipB._ended = true;
         tipB.stripped = false;
         return;
       }
@@ -1142,6 +1150,7 @@ Parser.prototype.startHtml = function (parent, hb, cur) {
     b.htag = m ? m[1].toLowerCase() : '';
   }
   b.literal = cur.remainder() + (this.curTerm !== undefined ? this.curTerm : '\n');
+  b._ended = htmlChunkEnds(b, b.literal);
   b.stripped = false;
   this.openBlock(b);
 };
@@ -1189,13 +1198,16 @@ class InlineParser {
   }
   pushNode(n) { this.nodes.push(n); return n; }
   makeBracket(node, isImage, contentStart, startPos) {
-    const br = { node, isImage, contentStart, delimLen: this.delims.length, active: true, tickInert: false, labelEnd: -1 };
-    const lab = scanLabel(this.s, startPos);
+    return { node, isImage, contentStart, startPos, delimLen: this.delims.length, active: true, tickInert: false, labelEnd: -1, analyzed: false };
+  }
+  analyzeBracket(br) {
+    if (br.analyzed) return;
+    br.analyzed = true;
+    const lab = scanLabel(this.s, br.startPos);
     if (lab) {
       br.labelEnd = lab.end - 1;
       br.tickInert = labelTickInert(lab.label);
     }
-    return br;
   }
   innermostBracket() {
     return this.brackets.length ? this.brackets[this.brackets.length - 1] : null;
@@ -1238,6 +1250,7 @@ class InlineParser {
         // a bracket whose label holds a 2+ run with a stray shorter tick
         // after it treats all its backticks as literal text
         const brInert = this.innermostBracket();
+        if (brInert) this.analyzeBracket(brInert);
         if (brInert && brInert.tickInert && i < brInert.labelEnd) {
           this.pushText('`'.repeat(n)); i += n; continue;
         }
@@ -1536,6 +1549,7 @@ InlineParser.prototype.tryBracket = function (i) {
   // backtick run in the label (not inerted) also rejects it. A bad-span
   // rejection also deactivates the label's emphasis delimiters.
   const labelSrc = s.slice(br.contentStart, i);
+  this.analyzeBracket(br);
   if (labelHasBadSpan(labelSrc)) {
     br.active = false;
     for (let k = br.delimLen; k < this.delims.length; k++) this.delims[k].num = 0;
