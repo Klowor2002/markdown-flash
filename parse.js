@@ -29,12 +29,19 @@ function charBefore(s, i) {
   return s[i - 1];
 }
 
+const WS_ASCII = new Set([' ', '\t', '\n', '\r', '\f', '\v']);
+const PUNCT_ASCII = new Set('!\"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'.split(''));
+
 function isWs(ch) {
-  return ch === '' || WS_RE.test(ch);
+  if (ch === '') return true;
+  if (ch.length === 1 && ch.charCodeAt(0) < 128) return WS_ASCII.has(ch);
+  return WS_RE.test(ch);
 }
 
 function isPunctU(ch) {
-  return ch !== '' && PUNCT_RE.test(ch);
+  if (ch === '') return false;
+  if (ch.length === 1 && ch.charCodeAt(0) < 128) return PUNCT_ASCII.has(ch);
+  return PUNCT_RE.test(ch);
 }
 
 // ------------------------------------------------------------- escaping
@@ -42,13 +49,12 @@ function isPunctU(ch) {
 // Escape a plain text run: & < > " ' — the run holds no entity-shaped
 // ampersand sequences (the scanner stops at '&'), so a blanket escape is
 // correct here.
+const ESC_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const ESC_RE = /[&<>"']/;
+const ESC_RE_G = /[&<>"']/g;
 function escapeTextRun(s) {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  if (!ESC_RE.test(s)) return s;
+  return s.replace(ESC_RE_G, (ch) => ESC_MAP[ch]);
 }
 
 // Escape one literal character for inclusion in text.
@@ -66,12 +72,8 @@ function escapeChar(ch) {
 // Escape code block / code span content: every special char, no entity
 // awareness.
 function escapeCode(s) {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  if (!ESC_RE.test(s)) return s;
+  return s.replace(ESC_RE_G, (ch) => ESC_MAP[ch]);
 }
 
 const ENTITY_SHAPE = /&[A-Za-z][A-Za-z0-9]*;/g;
@@ -79,22 +81,16 @@ const ENTITY_SHAPE = /&[A-Za-z][A-Za-z0-9]*;/g;
 // Entity-aware attribute escaping (href/title/class of ordinary links):
 // an '&' that begins an entity-shaped sequence is kept raw.
 function escapeAttr(s) {
+  if (!ESC_RE.test(s)) return s;
   return s
     .replace(/&(?![A-Za-z][A-Za-z0-9]*;)/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replace(/[<>"']/g, (ch) => ESC_MAP[ch]);
 }
 
 // Full attribute escaping (autolink hrefs): every '&' is escaped.
 function escapeAttrFull(s) {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  if (!ESC_RE.test(s)) return s;
+  return s.replace(ESC_RE_G, (ch) => ESC_MAP[ch]);
 }
 
 // marked's URL cleaning for hrefs.
@@ -223,6 +219,37 @@ function splitTableRow(row) {
 // ============================================================ inline ===
 
 const EMAIL_LOCAL = /[A-Za-z0-9._+\-]/;
+
+// Fast char-class check for email local-part characters.
+function isEmailLocalCode(cc) {
+  return (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) ||
+    (cc >= 97 && cc <= 122) || cc === 46 || cc === 95 || cc === 43 ||
+    cc === 45;
+}
+
+// Cheap pre-check: does an email candidate start at j? Scans the
+// local part with char codes and only then runs the full regex.
+function emailAt(text, j) {
+  const n = text.length;
+  let k = j;
+  while (k < n && isEmailLocalCode(text.charCodeAt(k))) k++;
+  if (k === j || text[k] !== '@') return false;
+  return EMAIL_RE.test(text.slice(j, j + 200));
+}
+
+// Cheap scheme check: returns the prefix length for http://,
+// https://, ftp:// at j, else 0.
+function schemeAt(text, j) {
+  const c0 = text[j];
+  if (c0 === 'h' || c0 === 'H') {
+    const m = /^https?:\/\//i.exec(text.slice(j, j + 8));
+    return m ? m[0].length : 0;
+  }
+  if (c0 === 'f' || c0 === 'F') {
+    return /^ftp:\/\//i.test(text.slice(j, j + 6)) ? 6 : 0;
+  }
+  return 0;
+}
 const EMAIL_RE = /^[A-Za-z0-9._+\-]+@(?:[A-Za-z0-9_-]+\.)+[A-Za-z0-9_-]+/;
 const CM_EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/;
 const SCHEME_AUTOLINK_RE = /^<([A-Za-z][A-Za-z0-9+.\-]{1,31}:[^ <>\n]*)>/;
@@ -867,7 +894,31 @@ function labelHasDanglingTick(text, a, b) {
 }
 
 // The inline parser: turns a block's text into HTML.
+// Any character or sequence that can trigger inline processing:
+// specials, autolink schemes / www. / mailto: / xmpp:, an '@' (email),
+// or a hard break (2+ spaces before a newline).
+const INLINE_TRIGGER = /[`\\!\[\]<>&*_~@]|https?:\/\/|ftp:\/\/|www\.|mailto:|xmpp:| {2}\n/i;
+
+// Run-loop character classes (ASCII): 0 = plain, 1 = hard special
+// (break), 2 = autolink-start candidate (h/f/w/m/x), 3 = email-local
+// char (word starts may begin an email).
+const RUN_CLASS = new Uint8Array(128);
+for (const ch of '\\`![]<>&*_~\n') RUN_CLASS[ch.charCodeAt(0)] = 1;
+for (const ch of 'hHfF') RUN_CLASS[ch.charCodeAt(0)] = 2;
+RUN_CLASS[119] = 2; // w
+RUN_CLASS[109] = 2; // m
+RUN_CLASS[120] = 2; // x
+for (let cc = 48; cc <= 57; cc++) RUN_CLASS[cc] = 3;
+for (let cc = 65; cc <= 90; cc++) if (!RUN_CLASS[cc]) RUN_CLASS[cc] = 3;
+for (let cc = 97; cc <= 122; cc++) if (!RUN_CLASS[cc]) RUN_CLASS[cc] = 3;
+RUN_CLASS[46] = 3; // .
+RUN_CLASS[43] = 3; // +
+RUN_CLASS[45] = 3; // -
+
 function parseInline(text, refs) {
+  // Fast path: nothing in the text can start an inline construct, so
+  // the whole span is literal text (INLINK state untouched).
+  if (!INLINE_TRIGGER.test(text)) return escapeTextRun(text);
   const n = text.length;
   const sentinel = newNode('root');
   let tail = sentinel;
@@ -1298,9 +1349,9 @@ function parseInline(text, refs) {
 
     // Extended autolinks and bare emails inside plain text.
     if (!INLINK.v && (c === 'h' || c === 'H' || c === 'f' || c === 'F')) {
-      const pm = URL_SCHEME_RE.exec(text.slice(i, i + 10));
+      const pm = schemeAt(text, i);
       if (pm) {
-        const url = scanUrlBody(text, i, pm[0].length, bracketStack.some((b) => b.active));
+        const url = scanUrlBody(text, i, pm, bracketStack.some((b) => b.active));
         if (url) {
           const nd = newNode('autolink');
           nd.raw = url;
@@ -1356,9 +1407,9 @@ function parseInline(text, refs) {
         }
       }
     }
-    if (!INLINK.v && EMAIL_LOCAL.test(c)) {
+    if (!INLINK.v && isEmailLocalCode(text.charCodeAt(i))) {
       const prevCh = charBefore(text, i);
-      if (!(prevCh !== '' && EMAIL_LOCAL.test(prevCh))) {
+      if (!(prevCh !== '' && EMAIL_LOCAL.test(prevCh)) && emailAt(text, i)) {
         const em = EMAIL_RE.exec(text.slice(i, i + 200));
         if (em) {
           let addr = em[0];
@@ -1390,21 +1441,27 @@ function parseInline(text, refs) {
     // stop where an extended autolink or email may begin.
     let j = i + 1;
     while (j < n) {
-      const ch = text[j];
-      if (ch === '\\' || ch === '\n' || ch === '`' || ch === '!' || ch === '[' || ch === ']' ||
-          ch === '<' || ch === '&' || ch === '*' || ch === '_' || ch === '~') break;
-      if (ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F') {
-        if (URL_SCHEME_RE.test(text.slice(j, j + 10))) break;
-      }
-      if (ch === 'w' && text.startsWith('www.', j)) {
-        const p = text[j - 1];
-        if (p === ' ' || p === '\t' || p === '\n' || p === '(' || p === '*' || p === '_' || p === '~') break;
-      }
-      if ((ch === 'm' || ch === 'x') && (text.startsWith('mailto:', j) || text.startsWith('xmpp:', j))) {
-        if (!EMAIL_LOCAL.test(text[j - 1])) break;
-      }
-      if (EMAIL_LOCAL.test(ch) && !EMAIL_LOCAL.test(text[j - 1])) {
-        if (EMAIL_RE.test(text.slice(j, j + 200))) break;
+      const cc = text.charCodeAt(j);
+      const cls = cc < 128 ? RUN_CLASS[cc] : 0;
+      if (cls === 1) break;
+      if (cls === 2) {
+        const ch = text[j];
+        if (cc === 104 || cc === 72 || cc === 102 || cc === 70) {
+          if (schemeAt(text, j)) break;
+        } else if (cc === 119 && text.startsWith('www.', j)) {
+          const p = text[j - 1];
+          if (p === ' ' || p === '\t' || p === '\n' || p === '(' || p === '*' || p === '_' || p === '~') break;
+        } else if ((cc === 109 || cc === 120) &&
+            (text.startsWith('mailto:', j) || text.startsWith('xmpp:', j))) {
+          if (!EMAIL_LOCAL.test(text[j - 1])) break;
+        }
+        if (isEmailLocalCode(cc) && !isEmailLocalCode(text.charCodeAt(j - 1))) {
+          if (emailAt(text, j)) break;
+        }
+      } else if (cls === 3) {
+        if (!isEmailLocalCode(text.charCodeAt(j - 1))) {
+          if (emailAt(text, j)) break;
+        }
       }
       j++;
     }
@@ -1467,11 +1524,12 @@ class Cursor {
     return cols;
   }
   get blank() {
-    if (this.partial > 0) {
-      // remaining partial spaces, then the rest must be whitespace
-      return /^[ \t]*$/.test(this.s.slice(this.offset));
+    const str = this.s;
+    for (let k = this.offset; k < str.length; k++) {
+      const c = str.charCodeAt(k);
+      if (c !== 32 && c !== 9) return false;
     }
-    return /^[ \t]*$/.test(this.s.slice(this.offset));
+    return true;
   }
   // Advance by `count` columns (columnsOnly) or characters.
   advance(count, columnsOnly) {
@@ -1972,8 +2030,16 @@ function fenceCloseMatch(block, rem) {
 }
 
 function isDelimRow(rem) {
+  // Fast gate: a delimiter row consists only of | - : space tab.
+  let hasDash = false;
+  for (let k = 0; k < rem.length; k++) {
+    const c = rem.charCodeAt(k);
+    if (c === 45) { hasDash = true; continue; }
+    if (c === 124 || c === 58 || c === 32 || c === 9) continue;
+    return false;
+  }
+  if (!hasDash) return false;
   const t = rem.trim();
-  if (!t.includes('-')) return false;
   const cells = splitTableRow(t);
   return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
 }
@@ -2441,7 +2507,22 @@ function leafParagraph(S, cur, line) {
   if (ind <= 3) probe.advance(ind, true);
   const prem = ind <= 3 ? probe.remainder() : rem;
   const lazyItem = S.lazyItemIdx !== undefined && S.lazyItemIdx !== null;
-  if (!lazyItem && ind <= 3 && SETEXT_RE.test(prem)) {
+  // Fast continuation: when the line is indented 4+, or its first
+  // character cannot begin any interrupting construct (setext, table
+  // delimiter, quote, ATX, fence, HR, HTML, list marker), it is a
+  // plain continuation — skip all the probes below.
+  let fast = false;
+  if (!lazyItem) {
+    if (ind > 3) fast = true;
+    else {
+      const c0 = prem.charCodeAt(0);
+      fast = !(c0 === 62 || c0 === 35 || c0 === 96 || c0 === 126 ||
+        c0 === 60 || c0 === 42 || c0 === 43 || c0 === 45 || c0 === 95 ||
+        c0 === 61 || c0 === 124 || c0 === 58 ||
+        (c0 >= 48 && c0 <= 57));
+    }
+  }
+  if (!fast && !lazyItem && ind <= 3 && SETEXT_RE.test(prem)) {
     const stripped = stripDefs(para.literal, S.refs);
     if (stripped.trim() !== '') {
       para.type = 'heading';
@@ -2453,10 +2534,10 @@ function leafParagraph(S, cur, line) {
       return;
     }
   }
-  if (!lazyItem && ind <= 3 && isDelimRow(prem) && tryTableConvert(S, para, prem)) return;
+  if (!fast && !lazyItem && ind <= 3 && isDelimRow(prem) && tryTableConvert(S, para, prem)) return;
   // Interruption checks.
   let interrupt = false;
-  if (ind <= 3) {
+  if (!fast && ind <= 3) {
     if (probe.peek() === '>') interrupt = true;
     else if (ATX_RE.test(prem)) interrupt = true;
     else if (fenceStartMatch(prem)) interrupt = true;
