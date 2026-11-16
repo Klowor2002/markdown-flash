@@ -135,11 +135,17 @@ class Cursor {
     return this.offset < this.s.length ? this.s[this.offset] : undefined;
   }
   remainder() {
-    if (this.partialTab > 0) return ' '.repeat(this.partialTab) + this.s.slice(this.offset);
-    const r = this.s.slice(this.offset);
-    // a tab right after a quote marker renders as 2 spaces
-    if (this.quoteTab) return r[0] === '\t' ? '  ' + r.slice(1) : '  ' + r;
-    return r;
+    const key = this.offset * 8 + this.partialTab * 2 + (this.quoteTab ? 1 : 0);
+    if (this._remKey === key) return this._remVal;
+    let out;
+    if (this.partialTab > 0) out = ' '.repeat(this.partialTab) + this.s.slice(this.offset);
+    else {
+      const r = this.s.slice(this.offset);
+      // a tab right after a quote marker renders as 2 spaces
+      out = this.quoteTab ? (r[0] === '\t' ? '  ' + r.slice(1) : '  ' + r) : r;
+    }
+    this._remKey = key; this._remVal = out;
+    return out;
   }
   // advance n columns; if columnsOnly, stop mid-tab leaving partial remainder
   advance(n, columnsOnly) {
