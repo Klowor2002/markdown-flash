@@ -1965,10 +1965,16 @@ function addItem(S, list, mk, cur) {
   // makes that item end with a blank (it loosens the list).
   const prev = list.children[list.children.length - 1];
   if (prev && prev.type === 'item' &&
-      (S.lastBlankLine || 0) > (prev.activeLine || 0)) {
+      (S.lastBlankLine || 0) > (prev.contentLine || 0) &&
+      (S.lastBlankLine || 0) < S.lineNo) {
+    // The previous item is already finalized by now (it was closed
+    // to make room for this sibling), so set endsWithBlank directly.
     prev.blankEnded = true;
+    prev.endsWithBlank = true;
   }
   const item = newBlock('item');
+  item.activeLine = S.lineNo;
+  item.contentLine = S.lineNo;
   item.markerCol = cur.column;
   item.relPad = mk.contentIndentCols;
   item.markerOff = cur.column - (list.regionCol || 0);
@@ -2748,8 +2754,12 @@ export function parse(src) {
   lines.forEach((line, idx) => {
     S.hasNL = idx < lines.length - 1 || endsNl;
     S.lineNo = idx + 1;
-    if (!/^[ \t]*$/.test(line)) {
-      for (const b of S.stack) b.activeLine = S.lineNo;
+    // Track per-block activity with a one-line lag: contentLine is
+    // the last line the block was active on BEFORE the current line
+    // began (drives the ends-with-blank rule in addItem).
+    for (const b of S.stack) {
+      b.contentLine = b.activeLine || 0;
+      if (!/^[ \t]*$/.test(line)) b.activeLine = S.lineNo;
     }
     processLine(S, line);
   });
