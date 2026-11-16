@@ -2352,7 +2352,8 @@ function processLine(S, line) {
     if (lp.indentCols() <= 3) lp.advance(lp.indentCols(), true);
     const lrem = lp.remainder();
     let blocked = HR_RE.test(lrem) || lp.peek() === '>' ||
-      !!parseListMarker(lp) || ATX_RE.test(lrem) || !!fenceStartMatch(lrem);
+      !!parseListMarker(lp) || ATX_RE.test(lrem) || !!fenceStartMatch(lrem) ||
+      !!htmlBlockStart(lrem, true);
     if (!blocked) {
       // Lazy lines keep their remainder verbatim, except that a
       // remainder indented by 4+ columns is stripped bare (probed:
