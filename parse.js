@@ -2134,22 +2134,39 @@ function processLine(S, line) {
         closeTop(S);
         return;
       }
-      // Content = the post-container remainder (container matching may
-      // have expanded a leading tab), minus up to fenceIndent leading
-      // whitespace characters (a tab counts as one character).
+      // Content = the post-container remainder, minus up to
+      // fenceIndent leading whitespace characters (a tab counts as
+      // one character). Tilde fences never strip (marked quirk).
+      // Inside a blockquote, tabs in the leading whitespace run are
+      // first expanded to tab stops computed from each tab's
+      // absolute column in the raw line (the cursor's column tracks
+      // exactly that), because marked's quote extraction expands
+      // them before the fence strip applies.
       let base = cur.remainder();
       if (stack.some((b) => b.type === 'blockquote')) {
-        // Inside a blockquote, a leading whitespace run containing a
-        // tab collapses to two spaces plus whatever followed the tab
-        // (probed: `> \tx`, `>  \tx`, `>\t y` -> 2, 2, 3 spaces).
-        const raw = cur.remainderRaw();
-        const run = /^[ \t]*/.exec(raw)[0];
+        // A tab that immediately follows the quote marker (`> \t` or
+        // `>\t`) becomes exactly two spaces in marked's output; any
+        // other tab in the run expands by absolute column below.
+        if (cur.partial === 0 && line[cur.offset] === '\t' &&
+            (line[cur.offset - 1] === '>' ||
+             (line[cur.offset - 1] === ' ' && line[cur.offset - 2] === '>'))) {
+          base = '  ' + cur.remainderRaw().slice(1);
+        }
+        const run = /^[ \t]*/.exec(base)[0];
         if (run.includes('\t')) {
-          base = '  ' + run.slice(run.lastIndexOf('\t') + 1) +
-            raw.slice(run.length);
+          let col = cur.column;
+          let out = '';
+          for (const ch of run) {
+            if (ch === ' ') { out += ' '; col += 1; } else {
+              const w = 4 - (col % 4);
+              out += ' '.repeat(w);
+              col += w;
+            }
+          }
+          base = out + base.slice(run.length);
         }
       }
-      let strip = tipB.fenceIndent;
+      let strip = tipB.fenceChar === '~' ? 0 : tipB.fenceIndent;
       let bi = 0;
       while (strip > 0 && (base[bi] === ' ' || base[bi] === '\t')) {
         bi++;
@@ -2186,7 +2203,7 @@ function processLine(S, line) {
           ac.advance(Math.min(itemAbs, ac.indentCols()), true);
         }
         let base = ac.remainder();
-        let strip = tipB.fenceIndent;
+        let strip = tipB.fenceChar === '~' ? 0 : tipB.fenceIndent;
         let bi = 0;
         while (strip > 0 && (base[bi] === ' ' || base[bi] === '\t')) {
           bi++;
