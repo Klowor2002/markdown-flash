@@ -1178,6 +1178,18 @@ class InlineParser {
     else this.nodes.push({ t: 'text', s: str });
   }
   pushNode(n) { this.nodes.push(n); return n; }
+  makeBracket(node, isImage, contentStart, startPos) {
+    const br = { node, isImage, contentStart, delimLen: this.delims.length, active: true, tickInert: false, labelEnd: -1 };
+    const lab = scanLabel(this.s, startPos);
+    if (lab) {
+      br.labelEnd = lab.end - 1;
+      br.tickInert = labelTickInert(lab.label);
+    }
+    return br;
+  }
+  innermostBracket() {
+    return this.brackets.length ? this.brackets[this.brackets.length - 1] : null;
+  }
   parse() {
     const s = this.s;
     let i = 0;
@@ -1213,6 +1225,12 @@ class InlineParser {
       }
       if (ch === '`') {
         let n = 0; while (s[i + n] === '`') n++;
+        // a bracket whose label holds a 2+ run with a stray shorter tick
+        // after it treats all its backticks as literal text
+        const brInert = this.innermostBracket();
+        if (brInert && brInert.tickInert && i < brInert.labelEnd) {
+          this.pushText('`'.repeat(n)); i += n; continue;
+        }
         const close = this.findCodeClose(i + n, n);
         if (close === -1) { this.pushText('`'.repeat(n)); i += n; continue; }
         let content = s.slice(i + n, close).replace(/\n/g, ' ');
@@ -1226,7 +1244,7 @@ class InlineParser {
         if (s[i + 1] === '[') {
           const node = { t: 'text', s: '![', noMerge: true };
           this.pushNode(node);
-          this.brackets.push({ node, isImage: true, contentStart: i + 2, delimLen: this.delims.length, active: true });
+          this.brackets.push(this.makeBracket(node, true, i + 2, i));
           i += 2; continue;
         }
         this.pushText('!'); i++; continue;
@@ -1234,7 +1252,7 @@ class InlineParser {
       if (ch === '[') {
         const node = { t: 'text', s: '[', noMerge: true };
         this.pushNode(node);
-        this.brackets.push({ node, isImage: false, contentStart: i + 1, delimLen: this.delims.length, active: true });
+        this.brackets.push(this.makeBracket(node, false, i + 1, i));
         i++; continue;
       }
       if (ch === ']') {
@@ -1270,7 +1288,7 @@ class InlineParser {
           canOpen = lf && (!rf || isUniPunct(prev));
           canClose = rf && (!lf || isUniPunct(next));
         }
-        this.delims.push({ node, char: ch, num: n, origNum: n, canOpen, canClose });
+        this.delims.push({ node, char: ch, num: n, origNum: n, canOpen, canClose, pairings: 0 });
         i += n; continue;
       }
       if (ch === '~') {
@@ -1280,7 +1298,7 @@ class InlineParser {
           this.pushNode(node);
           const prev = i > 0 ? s[i - 1] : undefined;
           const next = i + n < s.length ? s[i + n] : undefined;
-          this.delims.push({ node, char: '~', num: n, origNum: n, canOpen: !isWsCh(next), canClose: !isWsCh(prev) });
+          this.delims.push({ node, char: '~', num: n, origNum: n, canOpen: !isWsCh(next), canClose: !isWsCh(prev), pairings: 0 });
         } else this.pushText('~'.repeat(n));
         i += n; continue;
       }
@@ -1469,10 +1487,12 @@ InlineParser.prototype.tryBracket = function (i) {
     br.active = false;
     return null;
   }
-  // code-span rejection rule: a 2+ backtick span containing a backtick
-  // rejects the link unless the span ends exactly at the ]
+  // code-span rejection rules: a 2+ backtick span containing a backtick
+  // rejects the link unless the span ends exactly at the ]; a dangling
+  // backtick run in the label (not inerted) also rejects it
   const labelSrc = s.slice(br.contentStart, i);
   if (labelHasBadSpan(labelSrc)) { br.active = false; return null; }
+  if (!br.tickInert && labelHasDanglingRun(labelSrc)) { br.active = false; return null; }
   // form the link/image
   this.processEmphasis(br.delimLen);
   const children = this.nodes.splice(startIdx + 1);
@@ -1485,6 +1505,49 @@ InlineParser.prototype.tryBracket = function (i) {
   this.brackets.length = bi; // remove this bracket and any above (already gone)
   return endPos;
 };
+function labelHasDanglingRun(label) {
+  let i = 0;
+  while (i < label.length) {
+    if (label[i] === '`') {
+      let n = 0; while (label[i + n] === '`') n++;
+      let j = i + n, closed = -1;
+      while (j < label.length) {
+        if (label[j] === '`') {
+          let m = 0; while (label[j + m] === '`') m++;
+          if (m === n) { closed = j; break; }
+          j += m;
+        } else j++;
+      }
+      if (closed === -1) return true;
+      i = closed + n; continue;
+    }
+    i++;
+  }
+  return false;
+}
+function labelTickInert(label) {
+  let i = 0;
+  while (i < label.length) {
+    if (label[i] === '`') {
+      let n = 0; while (label[i + n] === '`') n++;
+      let j = i + n, closed = -1;
+      while (j < label.length) {
+        if (label[j] === '`') {
+          let m = 0; while (label[j + m] === '`') m++;
+          if (m === n) { closed = j; break; }
+          j += m;
+        } else j++;
+      }
+      if (closed === -1) {
+        if (n >= 2 && label.slice(i + n).includes('`')) return true;
+        return false;
+      }
+      i = closed + n; continue;
+    }
+    i++;
+  }
+  return false;
+}
 function labelHasBadSpan(label) {
   let i = 0;
   while (i < label.length) {
@@ -1519,7 +1582,7 @@ function unwrapAutolinks(nodes) {
     else if (n.children) unwrapAutolinks(n.children);
   }
 }
-InlineParser.prototype.emBlockedByGluedStrong = function (opener, closer) {
+InlineParser.prototype.contentHasGlued = function (opener, closer, tag, tailNoWs) {
   const nodes = this.nodes;
   const oi = nodes.indexOf(opener.node), ci = nodes.indexOf(closer.node);
   if (oi === -1 || ci === -1) return false;
@@ -1532,7 +1595,7 @@ InlineParser.prototype.emBlockedByGluedStrong = function (opener, closer) {
   }
   for (let k = oi + 1; k < ci; k++) {
     const n = nodes[k];
-    if (n.t !== 'strong' && n.t !== 'em') continue;
+    if (n.t !== tag) continue;
     // nearest non-empty siblings (consumed delimiter nodes linger as '')
     let prev = null, next = null;
     for (let m = k - 1; m > oi; m--) { if (nodes[m].t === 'text' && nodes[m].s === '') continue; prev = nodes[m]; break; }
@@ -1540,7 +1603,18 @@ InlineParser.prototype.emBlockedByGluedStrong = function (opener, closer) {
     const leftGlued = prev && prev.t === 'text' && /[A-Za-z0-9]$/.test(prev.s);
     if (leftGlued) continue; // left-glued inner is exempt
     const rightGlued = next && next.t === 'text' && /^[A-Za-z0-9]/.test(next.s);
-    if (rightGlued) return true;
+    if (!rightGlued) continue;
+    if (tailNoWs) {
+      // the block applies only when nothing but whitespace-free text
+      // sits between the inner emphasis and the closer
+      let ok = true;
+      for (let m = k + 1; m < ci; m++) {
+        const nm = nodes[m];
+        if (nm.t !== 'text' || /\s/.test(nm.s)) { ok = false; break; }
+      }
+      if (!ok) continue;
+    }
+    return true;
   }
   return false;
 };
@@ -1555,17 +1629,30 @@ InlineParser.prototype.processEmphasis = function (bottom) {
   closerIdx = findCloser(bottom);
   while (closerIdx !== -1) {
     const closer = delims[closerIdx];
-    // find nearest opener
-    let openerIdx = -1;
+    // find nearest usable opener (per-candidate validation)
+    let openerIdx = -1, use = 0, fallback = false;
     for (let k = closerIdx - 1; k >= bottom; k--) {
       const cand = delims[k];
       if (cand.char !== closer.char || !cand.canOpen || cand.num <= 0) continue;
-      if (closer.char === '~') { if (cand.num === closer.num) { openerIdx = k; break; } continue; }
+      if (closer.char === '~') { if (cand.num === closer.num) { openerIdx = k; use = closer.num; break; } continue; }
       // rule of three
       if ((cand.canClose || closer.canOpen) &&
           (cand.origNum + closer.origNum) % 3 === 0 &&
           !(cand.origNum % 3 === 0 && closer.origNum % 3 === 0)) continue;
-      openerIdx = k; break;
+      const u = (cand.num >= 2 && closer.num >= 2) ? 2 : 1;
+      // a strong opener cannot pair as an em over a glued inner em
+      if (closer.char === '*' && u === 1 && cand.num >= 2 && this.contentHasGlued(cand, closer, 'em')) continue;
+      // glued-emphasis rule (marked): a pair is blocked when its content
+      // holds a left-free, right-glued emphasis of the opposite strength
+      // (strong blocks em pairs; em blocks strong pairs). A blocked pair
+      // still forms when the closer run has >= 3 chars, with the leftover
+      // chars rendered literally inside the element (fallback pairing).
+      if (closer.char === '*' && ((u === 1 && this.contentHasGlued(cand, closer, 'strong')) ||
+          (u === 2 && this.contentHasGlued(cand, closer, 'em', true)))) {
+        if (closer.num >= 3) { openerIdx = k; use = u; fallback = true; break; }
+        continue;
+      }
+      openerIdx = k; use = u; break;
     }
     if (openerIdx === -1) {
       if (!closer.canOpen) { delims.splice(closerIdx, 1); closerIdx = findCloser(closerIdx); }
@@ -1573,29 +1660,6 @@ InlineParser.prototype.processEmphasis = function (bottom) {
       continue;
     }
     const opener = delims[openerIdx];
-    let use;
-    if (closer.char === '~') use = closer.num;
-    else use = (opener.num >= 2 && closer.num >= 2) ? 2 : 1;
-    // glued-emphasis rule (marked): an em pair is blocked when its content
-    // holds a strong that is left-free and right-glued to a word character
-    if (closer.char === '*' && use === 1 && this.emBlockedByGluedStrong(opener, closer)) {
-      // this opener cannot pair with this closer; look for an earlier opener
-      let alt = -1;
-      for (let k = openerIdx - 1; k >= bottom; k--) {
-        const cand = delims[k];
-        if (cand.char === '*' && cand.canOpen && cand.num > 0) { alt = k; break; }
-      }
-      if (alt === -1) {
-        if (!closer.canOpen) { delims.splice(closerIdx, 1); closerIdx = findCloser(closerIdx); }
-        else closerIdx = findCloser(closerIdx + 1);
-        continue;
-      }
-      // fall through with the alternative opener only if it also passes;
-      // simplest correct behavior: block the pair entirely for this closer
-      if (!closer.canOpen) { delims.splice(closerIdx, 1); closerIdx = findCloser(closerIdx); }
-      else closerIdx = findCloser(closerIdx + 1);
-      continue;
-    }
     // wrap nodes between opener.node and closer.node
     const oi = nodes.indexOf(opener.node);
     const ci = nodes.indexOf(closer.node);
@@ -1608,8 +1672,19 @@ InlineParser.prototype.processEmphasis = function (bottom) {
     nodes.splice(oi + 1, 0, wrap);
     // shrink delimiter text nodes
     opener.node.s = opener.node.s.slice(0, opener.node.s.length - use);
-    closer.node.s = closer.node.s.slice(use);
-    opener.num -= use; closer.num -= use;
+    if (fallback) {
+      // leftover closer chars render literally inside the element and
+      // the closer run is fully consumed
+      const left = closer.num - use;
+      if (left > 0) wrap.children.push({ t: 'text', s: closer.char.repeat(left) });
+      closer.node.s = '';
+      closer.num = 0;
+    } else {
+      closer.node.s = closer.node.s.slice(use);
+      closer.num -= use;
+    }
+    closer.pairings++;
+    opener.num -= use;
     // remove delimiters strictly between
     delims.splice(openerIdx + 1, closerIdx - openerIdx - 1);
     closerIdx = openerIdx + 1;
