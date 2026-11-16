@@ -165,41 +165,9 @@ function splitTableRow(row) {
       }
       continue;
     }
-    if (c === '`') {
-      let j = i;
-      while (j < n && row[j] === '`') j++;
-      // Marked's cell splitter matches code spans loosely: the next
-      // backtick run of ANY length closes the span (so `` ``x` `` is
-      // one span for splitting purposes and the pipe after it splits).
-      let k = j;
-      let closeEnd = -1;
-      while (k < n) {
-        if (row[k] === '`') {
-          let m = k;
-          while (m < n && row[m] === '`') m++;
-          closeEnd = m;
-          break;
-        }
-        k++;
-      }
-      if (closeEnd >= 0) {
-        // Copy the span, still unescaping \| -> | (marked unescapes
-        // escaped pipes at split time even inside code spans).
-        for (let k = i; k < closeEnd; k++) {
-          if (row[k] === '\\' && k + 1 < closeEnd && row[k + 1] === '|') {
-            cur += '|';
-            k++;
-          } else {
-            cur += row[k];
-          }
-        }
-        i = closeEnd;
-      } else {
-        cur += row.slice(i, j);
-        i = j;
-      }
-      continue;
-    }
+    // Note: marked's splitter has NO code-span awareness — a pipe
+    // inside a code span splits the row like any other pipe; only
+    // the escaped \| is protected (handled above).
     if (c === '|') {
       cells.push(cur);
       cur = '';
@@ -542,14 +510,11 @@ function unwrapAutolinks(first, last, parent) {
 // sibling (still inside the pair) starts with a word character.
 function hasGluedEmphasis(openNode, closeNode, pairKind) {
   const otherKind = pairKind === 'em' ? 'strong' : 'em';
-  // A "dead" star anywhere inside (a '*' delimiter that cannot open,
-  // e.g. `other*` before a space) exempts the pair from the rule.
-  for (let nd = openNode.next; nd && nd !== closeNode; nd = nd.next) {
-    if (nd.k === 'delim' && nd.dchar === '*' && nd.canOpen === false &&
-        (nd.raw || '') !== '') {
-      return false;
-    }
-  }
+  // The glued rule only blocks EM pairs (probed: `**a *b*two***`
+  // forms its strong despite the glued inner em, while `*a **b**c*`
+  // and `**a *b **c**d* e**` keep em-pairs from forming around a
+  // glued inner strong).
+  if (pairKind !== 'em') return false;
   let prev = openNode;
   for (let nd = openNode.next; nd && nd !== closeNode; nd = nd.next) {
     if (nd.k === otherKind) {
@@ -675,6 +640,27 @@ function processEmphasis(delimStack, bottom, ctx) {
     closer.len -= use;
     opener.node.raw = opener.char.repeat(opener.len);
     closer.node.raw = closer.char.repeat(closer.len);
+    // Marked quirk: a strong pair whose content ends with an em node
+    // glued to a whitespace-free word (`**a *b*two***`) swallows the
+    // closer's leftover stars INSIDE the strong instead of leaving
+    // them outside.
+    let movedIn = false;
+    let prevMeaningful = lastChild ? lastChild.prev : null;
+    while (prevMeaningful && prevMeaningful.k === 'delim' &&
+           (prevMeaningful.raw || '') === '') {
+      prevMeaningful = prevMeaningful.prev;
+    }
+    if (kind === 'strong' && closer.len > 0 && lastChild &&
+        lastChild.k === 'text' && !/\s/.test(lastChild.raw || '') &&
+        prevMeaningful && prevMeaningful.k === 'em') {
+      wrap.next = closer.node.next;
+      if (closer.node.next) closer.node.next.prev = wrap;
+      closer.node.prev = wrap.last;
+      if (wrap.last) wrap.last.next = closer.node;
+      wrap.last = closer.node;
+      closer.node.next = null;
+      movedIn = true;
+    }
     // Remove delimiter entries between opener and closer.
     delimStack.splice(openerIdx + 1, closerIdx - openerIdx - 1);
     closerIdx = openerIdx + 1;
@@ -683,7 +669,9 @@ function processEmphasis(delimStack, bottom, ctx) {
       delimStack.splice(openerIdx, 1);
       closerIdx--;
     }
-    if (closer.len === 0) {
+    if (movedIn) {
+      delimStack.splice(closerIdx, 1);
+    } else if (closer.len === 0) {
       delimStack.splice(closerIdx, 1);
     }
     // The (possibly same) closer may pair again; rescan from here.
