@@ -136,7 +136,10 @@ class Cursor {
   }
   remainder() {
     if (this.partialTab > 0) return ' '.repeat(this.partialTab) + this.s.slice(this.offset);
-    return this.s.slice(this.offset);
+    const r = this.s.slice(this.offset);
+    // a tab right after a quote marker renders as 2 spaces
+    if (this.quoteTab) return r[0] === '\t' ? '  ' + r.slice(1) : '  ' + r;
+    return r;
   }
   // advance n columns; if columnsOnly, stop mid-tab leaving partial remainder
   advance(n, columnsOnly) {
@@ -676,16 +679,14 @@ class Parser {
         if (cur.indent <= 3 && cur.partialTab === 0 && cur.s[cur.nextNonspace] === '>') {
           cur.advance(cur.indent, false);
           cur.advanceChars(1);
-          if (cur.peek() === ' ' || (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t')) {
-            // optional single space / tab-by-column
-            const beforeOff = cur.offset;
-            cur.advance(1, true);
-            if (cur.offset === beforeOff && cur.partialTab === 0) { /* nothing */ }
-          }
-          // tab right after quote marker becomes 2 spaces for content purposes
-          if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t' && cur.indent >= 0) {
-            // only when the tab is the first content char
+          if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t') {
+            // a tab as the quote's optional whitespace renders as 2 spaces
             cur.quoteTab = true;
+            cur.advanceChars(1);
+          } else if (cur.peek() === ' ') {
+            cur.advance(1, true);
+            // tab right after the consumed space also becomes 2 spaces
+            if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t') cur.quoteTab = true;
           }
           lastMatched = i;
         } else break;
@@ -862,7 +863,12 @@ class Parser {
       if (!this.lazyWouldStart(cur)) {
         const rem = cur.remainder();
         const firstNonspace = rem.replace(/^[ \t]+/, '');
-        if (matchSetext(firstNonspace) > 0 || isThematicBreak(firstNonspace)) {
+        const lastNlL = tipNow.literal.lastIndexOf('\n');
+        const lastLineL = lastNlL === -1 ? tipNow.literal : tipNow.literal.slice(lastNlL + 1);
+        if (/  $/.test(lastLineL) || lastLineL.endsWith('\\')) {
+          // after a hard break the lazy continuation is stripped
+          tipNow.literal += '\n' + firstNonspace;
+        } else if (matchSetext(firstNonspace) > 0 || isThematicBreak(firstNonspace)) {
           tipNow.literal += '\n    ' + firstNonspace.replace(/[ \t]+$/, '');
         } else if (cur.indent >= 4) {
           tipNow.literal += '\n' + firstNonspace;
@@ -900,7 +906,6 @@ class Parser {
   fenceContentLine(fence, cur) {
     let rem = cur.remainder();
     const inQuote = this.stack.some(b => b.type === 'blockquote');
-    if (cur.quoteTab) rem = '  ' + rem.replace(/^\t/, '');
     if (inQuote || cur.column > 0) rem = expandLeadingTabs(rem, cur.column);
     if (fence.fch === '`') {
       // strip up to fence.indentChars whitespace chars
@@ -916,7 +921,7 @@ class Parser {
     while (n.lastChild) { n = n.lastChild; if (n.type === 'html') target = n; }
     if (!target || target.stripped || !target.literal.endsWith('\n')) return;
     if (target.htype >= 6) { target.literal = target.literal.slice(0, -1); target.stripped = true; }
-    else if (kind !== 'tab') { target.literal = target.literal.slice(0, -1); target.stripped = true; }
+    else if (kind === 'empty') { target.literal = target.literal.slice(0, -1); target.stripped = true; }
   }
   isTableEndLine(cur) {
     if (cur.indent <= 3) {
@@ -979,8 +984,13 @@ Parser.prototype.tryStarts = function (cur, lazyFallthrough) {
         this.openBlock(bq);
         cur.advance(cur.indent, false);
         cur.advanceChars(1);
-        if (cur.peek() === ' ' || (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t')) cur.advance(1, true);
-        if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t') cur.quoteTab = true;
+        if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t') {
+          cur.quoteTab = true;
+          cur.advanceChars(1);
+        } else if (cur.peek() === ' ') {
+          cur.advance(1, true);
+          if (cur.partialTab === 0 && cur.offset < cur.s.length && cur.s[cur.offset] === '\t') cur.quoteTab = true;
+        }
         continue;
       }
       const setextLike = tip.type === 'paragraph' && matchSetext(first.replace(/[ \t]+$/, '')) > 0;
@@ -1269,7 +1279,11 @@ class InlineParser {
         if (tag) {
           this.pushNode({ t: 'html', s: tag.raw });
           const tn = tag.tagName.toLowerCase();
-          if (tn === 'a' && !tag.raw.endsWith('/>')) this.inlink = !tag.closing;
+          if (tn === 'a') {
+            if (tag.closing) this.inlink = false;
+            // marked opens inLink only for '<a ' (a + literal space)
+            else if (/^<a /i.test(tag.raw)) this.inlink = true;
+          }
           i = tag.end; continue;
         }
         this.pushText('<'); i++; continue;
@@ -1288,7 +1302,7 @@ class InlineParser {
           canOpen = lf && (!rf || isUniPunct(prev));
           canClose = rf && (!lf || isUniPunct(next));
         }
-        this.delims.push({ node, char: ch, num: n, origNum: n, canOpen, canClose, pairings: 0 });
+        this.delims.push({ node, char: ch, num: n, origNum: n, canOpen, canClose, pairings: 0, pos: i });
         i += n; continue;
       }
       if (ch === '~') {
@@ -1298,7 +1312,7 @@ class InlineParser {
           this.pushNode(node);
           const prev = i > 0 ? s[i - 1] : undefined;
           const next = i + n < s.length ? s[i + n] : undefined;
-          this.delims.push({ node, char: '~', num: n, origNum: n, canOpen: !isWsCh(next), canClose: !isWsCh(prev), pairings: 0 });
+          this.delims.push({ node, char: '~', num: n, origNum: n, canOpen: !isWsCh(next), canClose: !isWsCh(prev), pairings: 0, pos: i });
         } else this.pushText('~'.repeat(n));
         i += n; continue;
       }
@@ -1370,8 +1384,21 @@ class InlineParser {
     else if (head.startsWith('http://')) prefixLen = 7;
     else if (s.startsWith('www.', i)) { prefixLen = 4; isWww = true; }
     if (prefixLen > 0) {
+      // marked's autolink scan: segment chars (incl. ] and )) interrupted
+      // by balanced (...) groups; ] stops the scan only inside a bracket
+      // that can still form a link
+      const stopAtBracket = this.brackets.some(b => b.active && !b.hasLink);
       let j = i + prefixLen;
-      while (j < s.length && !isWsCh(s[j]) && s[j] !== '<' && s[j] !== '>' && s[j] !== ']' && s[j] !== '[') j++;
+      for (;;) {
+        while (j < s.length && !isWsCh(s[j]) && s[j] !== '<' && s[j] !== '>' && s[j] !== '(' && s[j] !== '[' &&
+               !(stopAtBracket && s[j] === ']')) j++;
+        if (s[j] === '(') {
+          let k = j + 1;
+          while (k < s.length && !isWsCh(s[k]) && s[k] !== '<' && s[k] !== '>' && s[k] !== '(' && s[k] !== ')') k++;
+          if (s[k] === ')') { j = k + 1; continue; }
+        }
+        break;
+      }
       if (j === i + prefixLen) return null;
       let url = s.slice(i, j);
       url = trimAutolink(url);
@@ -1385,14 +1412,29 @@ class InlineParser {
     if (m) {
       if (/[-_]$/.test(m[0])) return null;
       const after = s[i + m[0].length];
-      if ((after === '-' || after === '_') && !/[A-Za-z0-9]/.test(s[i + m[0].length + 1] || '')) return null;
+      // a trailing -/_ kills the autolink unless we are inside an open
+      // emphasis run (where the char is a closing delimiter, not text)
+      const inEmph = this.delims.some(d => d.canOpen && d.num > 0);
+      if (!inEmph && (after === '-' || after === '_') && !/[A-Za-z0-9]/.test(s[i + m[0].length + 1] || '')) return null;
       const text = m[0];
       return { node: { t: 'link', href: 'mailto:' + text, title: null, auto: 'ext', children: [{ t: 'text', s: text }] }, end: i + text.length };
     }
     return null;
   }
 }
-function trimAutolink(url) {
+function lastParenIsGroupClose(u) {
+  let i = 0;
+  while (i < u.length) {
+    if (u[i] === '(') {
+      let d = 1, j = i + 1;
+      while (j < u.length && d > 0) { if (u[j] === '(') d++; else if (u[j] === ')') d--; j++; }
+      if (d === 0) { if (j - 1 === u.length - 1) return true; i = j; continue; }
+      i++;
+    } else i++;
+  }
+  return false;
+}
+function trimAutolink(url, parenBase = 0) {
   let u = url;
   for (;;) {
     if (!u) return u;
@@ -1405,10 +1447,12 @@ function trimAutolink(url) {
       else u = u.slice(0, -1);
       continue;
     }
-    if (last === ')' || last === ']' || last === '}') {
-      const open = last === ')' ? '(' : last === ']' ? '[' : '{';
+    if (last === ')') {
+      // a trailing ) that closes a balanced (...) group is kept;
+      // ] and } are never trimmed (trimming stops at them)
+      if (lastParenIsGroupClose(u)) break;
       let depth = 0;
-      for (const c of u) { if (c === open) depth++; else if (c === last) depth--; }
+      for (const c of u) { if (c === '(') depth++; else if (c === ')') depth--; }
       if (depth < 0) { u = u.slice(0, -1); continue; }
     }
     break;
@@ -1489,17 +1533,31 @@ InlineParser.prototype.tryBracket = function (i) {
   }
   // code-span rejection rules: a 2+ backtick span containing a backtick
   // rejects the link unless the span ends exactly at the ]; a dangling
-  // backtick run in the label (not inerted) also rejects it
+  // backtick run in the label (not inerted) also rejects it. A bad-span
+  // rejection also deactivates the label's emphasis delimiters.
   const labelSrc = s.slice(br.contentStart, i);
-  if (labelHasBadSpan(labelSrc)) { br.active = false; return null; }
+  if (labelHasBadSpan(labelSrc)) {
+    br.active = false;
+    for (let k = br.delimLen; k < this.delims.length; k++) this.delims[k].num = 0;
+    return null;
+  }
   if (!br.tickInert && labelHasDanglingRun(labelSrc)) { br.active = false; return null; }
-  // form the link/image
+  // form the link/image (label-internal emphasis is shielded from the
+  // inert-link taint, which only affects the outer paragraph pass)
+  const savedTaint = this.inertLinkEnds;
+  this.inertLinkEnds = null;
   this.processEmphasis(br.delimLen);
+  this.inertLinkEnds = savedTaint;
+  // a link whose label backticks were inert taints later emphasis in
+  // this paragraph when a backtick run follows the pair (marked quirk)
+  if (!br.isImage && br.tickInert) (this.inertLinkEnds ||= []).push(i);
   const children = this.nodes.splice(startIdx + 1);
   this.nodes.pop(); // remove the bracket text node itself (now last)
   unwrapAutolinks(children);
   const node = { t: br.isImage ? 'image' : 'link', href: dest, title, children };
   this.nodes.push(node);
+  // a formed link taints every enclosing bracket (it can no longer form)
+  if (!br.isImage) for (let k = 0; k < bi; k++) this.brackets[k].hasLink = true;
   // drop delimiters that lived inside the bracket
   this.delims.length = Math.min(this.delims.length, br.delimLen);
   this.brackets.length = bi; // remove this bracket and any above (already gone)
@@ -1516,11 +1574,13 @@ function labelHasDanglingRun(label) {
           let m = 0; while (label[j + m] === '`') m++;
           if (m === n) { closed = j; break; }
           j += m;
-        } else j++;
+        } else if (label[j] === '\\') j += 2;
+        else j++;
       }
       if (closed === -1) return true;
       i = closed + n; continue;
     }
+    if (label[i] === '\\') { i += 2; continue; }
     i++;
   }
   return false;
@@ -1536,7 +1596,8 @@ function labelTickInert(label) {
           let m = 0; while (label[j + m] === '`') m++;
           if (m === n) { closed = j; break; }
           j += m;
-        } else j++;
+        } else if (label[j] === '\\') j += 2;
+        else j++;
       }
       if (closed === -1) {
         if (n >= 2 && label.slice(i + n).includes('`')) return true;
@@ -1544,6 +1605,7 @@ function labelTickInert(label) {
       }
       i = closed + n; continue;
     }
+    if (label[i] === '\\') { i += 2; continue; }
     i++;
   }
   return false;
@@ -1571,6 +1633,7 @@ function labelHasBadSpan(label) {
       }
       i += n; continue;
     }
+    if (label[i] === '\\') { i += 2; continue; }
     i++;
   }
   return false;
@@ -1640,6 +1703,19 @@ InlineParser.prototype.processEmphasis = function (bottom) {
           (cand.origNum + closer.origNum) % 3 === 0 &&
           !(cand.origNum % 3 === 0 && closer.origNum % 3 === 0)) continue;
       const u = (cand.num >= 2 && closer.num >= 2) ? 2 : 1;
+      // inert-link taint: pair after an inert-label link with a backtick
+      // run anywhere after the closer is suppressed
+      if (this.inertLinkEnds && cand.pos !== undefined) {
+        let tainted = false;
+        for (const e of this.inertLinkEnds) if (e < cand.pos) { tainted = true; break; }
+        if (tainted) {
+          const s = this.s;
+          for (let m = closer.pos + closer.origNum; m < s.length; m++) {
+            if (s[m] === '`') { tainted = 'yes'; break; }
+          }
+          if (tainted === 'yes') continue;
+        }
+      }
       // a strong opener cannot pair as an em over a glued inner em
       if (closer.char === '*' && u === 1 && cand.num >= 2 && this.contentHasGlued(cand, closer, 'em')) continue;
       // glued-emphasis rule (marked): a pair is blocked when its content
