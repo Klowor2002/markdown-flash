@@ -32,6 +32,15 @@ function charBefore(s, i) {
 const WS_ASCII = new Set([' ', '\t', '\n', '\r', '\f', '\v']);
 const PUNCT_ASCII = new Set('!\"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~'.split(''));
 
+// Blank-line test without a regex (hot: runs on every line).
+function isBlankStr(line) {
+  for (let k = 0; k < line.length; k++) {
+    const c = line.charCodeAt(k);
+    if (c !== 32 && c !== 9) return false;
+  }
+  return true;
+}
+
 function isWs(ch) {
   if (ch === '') return true;
   if (ch.length === 1 && ch.charCodeAt(0) < 128) return WS_ASCII.has(ch);
@@ -330,7 +339,12 @@ function scanUrlBody(text, i, prefixLen, stopBracket) {
 // k: 'text' | 'code' | 'html' | 'br' | 'autolink' | 'delim' | 'open' |
 //    'em' | 'strong' | 'del' | 'link' | 'image'
 function newNode(k) {
-  return { k, prev: null, next: null, first: null, last: null, html: '', raw: '' };
+  return {
+    k, prev: null, next: null, first: null, last: null, html: '', raw: '',
+    // Declared up front for a single hidden class across node kinds.
+    alt: '', href: '', title: '', angle: false, canOpen: false, dchar: '',
+    hrefKind: '',
+  };
 }
 
 function listAppend(head, tail, node) {
@@ -1628,6 +1642,27 @@ function newBlock(type) {
     contentIndent: 0,
     endsWithBlank: false,
     taskChecked: null, // null | boolean for list items
+    // Fields assigned later per block type — declared up front so
+    // every block shares one hidden class (JIT stability).
+    inlineText: '',
+    prevHard: false,
+    sawBlank: false,
+    blankSeparated: false,
+    blankEnded: false,
+    activeLine: 0,
+    contentLine: 0,
+    fenceIndent: 0,
+    info: '',
+    markerCol: 0,
+    markerOff: 0,
+    relPad: 0,
+    needCols: 0,
+    regionCol: 0,
+    looseBlank: false,
+    removed: false,
+    header: null,
+    aligns: null,
+    rows: null,
   };
 }
 
@@ -2047,7 +2082,7 @@ function isDelimRow(rem) {
 function processLine(S, line) {
   const stack = S.stack;
   const cur = new Cursor(line);
-  const rawBlank = /^[ \t]*$/.test(line);
+  const rawBlank = isBlankStr(line);
   S.lazyItemIdx = undefined;
 
   // Resolve a deferred empty-item break from a previous blank line.
@@ -2780,7 +2815,7 @@ export function parse(src) {
     // began (drives the ends-with-blank rule in addItem).
     for (const b of S.stack) {
       b.contentLine = b.activeLine || 0;
-      if (!/^[ \t]*$/.test(line)) b.activeLine = S.lineNo;
+      if (!isBlankStr(line)) b.activeLine = S.lineNo;
     }
     processLine(S, line);
   });
